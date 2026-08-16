@@ -121,11 +121,14 @@ app.post('/api/analyze', async (req, res) => {
   try {
     const { messages, mode } = req.body;
     const model = mode === 'photo' ? PHOTO_MODEL : TEXT_MODEL;
+    const reasoningEffort = mode === 'photo' ? 'none' : 'low';
     const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${GROQ_API_KEY}` },
       body: JSON.stringify({ model, messages, temperature: 0.1, max_tokens: 1500,
-        response_format: mode !== 'photo' ? { type: 'json_object' } : undefined })
+        response_format: { type: 'json_object' },
+        reasoning_format: 'hidden',
+        reasoning_effort: reasoningEffort })
     });
     const data = await response.json();
     if (data.error) throw new Error(`Groq ${model}: ${data.error.message}`);
