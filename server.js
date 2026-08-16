@@ -22,6 +22,9 @@ const EMAIL_TO         = process.env.EMAIL_TO;
 const DAILY_LIMIT      = parseInt(process.env.DAILY_LIMIT || '14400');
 const ALERT_PERCENT    = 0.80;
 const COUNTER_FILE     = path.join('/tmp', 'kalenderai_counter.json');
+const TEXT_MODEL       = process.env.GROQ_TEXT_MODEL || 'openai/gpt-oss-120b';
+const PHOTO_MODEL      = process.env.GROQ_PHOTO_MODEL || 'qwen/qwen3.6-27b';
+const TRANSCRIBE_MODEL = process.env.GROQ_TRANSCRIBE_MODEL || 'whisper-large-v3';
 
 function today() {
   return new Date().toISOString().split('T')[0];
@@ -117,7 +120,7 @@ app.post('/api/analyze', async (req, res) => {
   if (c.count >= DAILY_LIMIT) return res.status(429).json({ error: 'Tageslimit erreicht. Bitte morgen versuchen.' });
   try {
     const { messages, mode } = req.body;
-    const model = mode === 'photo' ? 'meta-llama/llama-4-scout-17b-16e-instruct' : 'llama-3.3-70b-versatile';
+    const model = mode === 'photo' ? PHOTO_MODEL : TEXT_MODEL;
     const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${GROQ_API_KEY}` },
@@ -125,7 +128,7 @@ app.post('/api/analyze', async (req, res) => {
         response_format: mode !== 'photo' ? { type: 'json_object' } : undefined })
     });
     const data = await response.json();
-    if (data.error) throw new Error(data.error.message);
+    if (data.error) throw new Error(`Groq ${model}: ${data.error.message}`);
     c.count++;
     saveCounter(c);
     await checkAndAlert(c);
@@ -142,7 +145,7 @@ app.post('/api/transcribe', upload.single('file'), async (req, res) => {
   try {
     const formData = new FormData();
     formData.append('file', req.file.buffer, { filename: 'audio.webm', contentType: req.file.mimetype || 'audio/webm' });
-    formData.append('model', 'whisper-large-v3');
+    formData.append('model', TRANSCRIBE_MODEL);
     formData.append('language', 'de');
     formData.append('response_format', 'text');
     const response = await fetch('https://api.groq.com/openai/v1/audio/transcriptions', {
