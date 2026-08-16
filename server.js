@@ -22,9 +22,14 @@ const EMAIL_TO         = process.env.EMAIL_TO;
 const DAILY_LIMIT      = parseInt(process.env.DAILY_LIMIT || '14400');
 const ALERT_PERCENT    = 0.80;
 const COUNTER_FILE     = path.join('/tmp', 'kalenderai_counter.json');
-const TEXT_MODEL       = process.env.GROQ_TEXT_MODEL || 'openai/gpt-oss-120b';
-const PHOTO_MODEL      = process.env.GROQ_PHOTO_MODEL || 'qwen/qwen3.6-27b';
+const TEXT_MODELS      = parseModelList(process.env.GROQ_TEXT_MODELS || process.env.GROQ_TEXT_MODEL || 'openai/gpt-oss-120b');
+const PHOTO_MODELS     = parseModelList(process.env.GROQ_PHOTO_MODELS || process.env.GROQ_PHOTO_MODEL || 'qwen/qwen3.6-27b');
 const TRANSCRIBE_MODEL = process.env.GROQ_TRANSCRIBE_MODEL || 'whisper-large-v3';
+const MODEL_CHECK_TOKEN = process.env.MODEL_CHECK_TOKEN;
+
+function parseModelList(value) {
+  return [...new Set(String(value || '').split(',').map(model => model.trim()).filter(Boolean))];
+}
 
 function today() {
   return new Date().toISOString().split('T')[0];
@@ -91,6 +96,91 @@ async function checkAndAlert(c) {
   }
 }
 
+async function sendModelFallbackAlert(c, mode, failedModel, fallbackModel, errorMessage) {
+  const key = `${mode}:${failedModel}`;
+  c.modelAlerts = c.modelAlerts || {};
+  if (c.modelAlerts[key] === c.date) return;
+
+  c.modelAlerts[key] = c.date;
+  saveCounter(c);
+
+  const msg = [
+    'KalenderAI model fallback',
+    '',
+    `Mode: ${mode}`,
+    `Failed model: ${failedModel}`,
+    `Fallback model: ${fallbackModel}`,
+    `Error: ${errorMessage}`,
+    `Date: ${c.date}`
+  ].join('\n');
+
+  await Promise.all([
+    sendTelegram(msg.replace(/\n/g, '\n')),
+    sendEmail('KalenderAI model fallback', msg)
+  ]);
+}
+
+function isModelUnavailableError(data) {
+  const message = String(data && data.error && data.error.message || '').toLowerCase();
+  return message.includes('model') && (
+    message.includes('does not exist') ||
+    message.includes('not have access') ||
+    message.includes('decommission') ||
+    message.includes('deprecated')
+  );
+}
+
+function canCheckModels(req) {
+  if (!MODEL_CHECK_TOKEN) return true;
+  const auth = req.get('authorization') || '';
+  return auth === `Bearer ${MODEL_CHECK_TOKEN}` || req.query.token === MODEL_CHECK_TOKEN;
+}
+
+function checkConfiguredModels(availableModels, configuredModels) {
+  return configuredModels.map(model => ({
+    model,
+    available: availableModels.has(model)
+  }));
+}
+
+async function callGroqChat(messages, mode, c) {
+  const models = mode === 'photo' ? PHOTO_MODELS : TEXT_MODELS;
+  const reasoningEffort = mode === 'photo' ? 'none' : 'low';
+  let lastError;
+
+  for (let i = 0; i < models.length; i++) {
+    const model = models[i];
+    const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${GROQ_API_KEY}` },
+      body: JSON.stringify({
+        model,
+        messages,
+        temperature: 0.1,
+        max_tokens: 1500,
+        response_format: { type: 'json_object' },
+        reasoning_format: 'hidden',
+        reasoning_effort: reasoningEffort
+      })
+    });
+    const data = await response.json();
+
+    if (!data.error) {
+      if (i > 0) await sendModelFallbackAlert(c, mode, models[i - 1], model, lastError);
+      return data;
+    }
+
+    lastError = data.error.message || JSON.stringify(data.error);
+    if (!isModelUnavailableError(data) || i === models.length - 1) {
+      throw new Error(`Groq ${model}: ${lastError}`);
+    }
+
+    console.warn(`Groq ${model} unavailable, trying fallback ${models[i + 1]}: ${lastError}`);
+  }
+
+  throw new Error(`No Groq ${mode} model configured`);
+}
+
 // ── Routes ────────────────────────────────────────────────────────────────
 app.get('/', (req, res) => {
   const c = getCounter();
@@ -115,23 +205,41 @@ app.get('/stats', (req, res) => {
   });
 });
 
+app.get('/model-check', async (req, res) => {
+  if (!canCheckModels(req)) return res.status(401).json({ error: 'Unauthorized' });
+
+  try {
+    const response = await fetch('https://api.groq.com/openai/v1/models', {
+      headers: { 'Authorization': `Bearer ${GROQ_API_KEY}` }
+    });
+    const data = await response.json();
+    if (data.error) throw new Error(data.error.message);
+
+    const availableModels = new Set((data.data || []).map(model => model.id));
+    const checks = {
+      text: checkConfiguredModels(availableModels, TEXT_MODELS),
+      photo: checkConfiguredModels(availableModels, PHOTO_MODELS),
+      transcribe: checkConfiguredModels(availableModels, [TRANSCRIBE_MODEL])
+    };
+    const ok = Object.values(checks).flat().every(item => item.available);
+
+    res.status(ok ? 200 : 503).json({
+      status: ok ? 'ok' : 'model_unavailable',
+      checkedAt: new Date().toISOString(),
+      checks
+    });
+  } catch(err) {
+    console.error('Model check error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.post('/api/analyze', async (req, res) => {
   const c = getCounter();
   if (c.count >= DAILY_LIMIT) return res.status(429).json({ error: 'Tageslimit erreicht. Bitte morgen versuchen.' });
   try {
     const { messages, mode } = req.body;
-    const model = mode === 'photo' ? PHOTO_MODEL : TEXT_MODEL;
-    const reasoningEffort = mode === 'photo' ? 'none' : 'low';
-    const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${GROQ_API_KEY}` },
-      body: JSON.stringify({ model, messages, temperature: 0.1, max_tokens: 1500,
-        response_format: { type: 'json_object' },
-        reasoning_format: 'hidden',
-        reasoning_effort: reasoningEffort })
-    });
-    const data = await response.json();
-    if (data.error) throw new Error(`Groq ${model}: ${data.error.message}`);
+    const data = await callGroqChat(messages, mode, c);
     c.count++;
     saveCounter(c);
     await checkAndAlert(c);
