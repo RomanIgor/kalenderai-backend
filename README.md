@@ -74,6 +74,21 @@ Setup:
 4. Get your chat id and add it to Render as `TELEGRAM_CHAT_ID`.
 5. Redeploy the Render service.
 
+Test alert:
+
+```text
+https://kalenderai-backend.onrender.com/test-alert?token=YOUR_TOKEN
+```
+
+Expected response:
+
+```json
+{
+  "status": "sent",
+  "telegramConfigured": true
+}
+```
+
 ## Model Health Check
 
 Endpoint:
@@ -151,4 +166,3 @@ If it does not:
 1. Open the Render service.
 2. Click `Manual Deploy`.
 3. Click `Deploy latest commit`.
-

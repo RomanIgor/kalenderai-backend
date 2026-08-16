@@ -264,6 +264,28 @@ app.get('/model-check', async (req, res) => {
   }
 });
 
+app.get('/test-alert', async (req, res) => {
+  if (!canCheckModels(req)) return res.status(401).json({ error: 'Unauthorized' });
+
+  const msg = [
+    'KalenderAI test alert',
+    '',
+    'Telegram/email alerts are configured correctly.',
+    `Date: ${today()}`
+  ].join('\n');
+
+  await Promise.all([
+    sendTelegram(msg),
+    sendEmail('KalenderAI test alert', msg)
+  ]);
+
+  res.json({
+    status: 'sent',
+    telegramConfigured: Boolean(TELEGRAM_TOKEN && TELEGRAM_CHAT_ID),
+    emailConfigured: Boolean(EMAIL_USER && EMAIL_PASS && EMAIL_TO)
+  });
+});
+
 app.post('/api/analyze', async (req, res) => {
   const c = getCounter();
   if (c.count >= DAILY_LIMIT) return res.status(429).json({ error: 'Tageslimit erreicht. Bitte morgen versuchen.' });
