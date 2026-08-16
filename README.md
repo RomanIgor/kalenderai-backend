@@ -66,6 +66,12 @@ The backend sends Telegram alerts for:
 - automatic Groq model fallback
 - failed `/model-check` when a configured model is no longer available
 
+Confirmed setup:
+
+- `/test-alert` was tested successfully and Telegram received the message.
+- The cron-job.org daily check was created to call `/model-check`.
+- `MODEL_CHECK_TOKEN` is a separate secret for `/model-check` and `/test-alert`; it is not the Telegram bot token and not the Telegram chat id.
+
 Setup:
 
 1. Create a bot with Telegram `@BotFather`.
@@ -80,13 +86,25 @@ Test alert:
 https://kalenderai-backend.onrender.com/test-alert?token=YOUR_TOKEN
 ```
 
+Use the value from Render `MODEL_CHECK_TOKEN` in place of `YOUR_TOKEN`.
+
 Expected response:
 
 ```json
 {
   "status": "sent",
-  "telegramConfigured": true
+  "telegramConfigured": true,
+  "emailConfigured": false
 }
+```
+
+Expected Telegram message:
+
+```text
+KalenderAI test alert
+
+Telegram/email alerts are configured correctly.
+Date: YYYY-MM-DD
 ```
 
 ## Model Health Check
@@ -134,6 +152,8 @@ Recommended cron-job.org configuration:
 - Method: `GET`
 - Schedule: daily, for example 08:00 Europe/Berlin
 - Expected status: `200`
+
+Use the same `MODEL_CHECK_TOKEN` value here. If cron-job.org receives HTTP `200`, the models are available. If it receives HTTP `503`, at least one configured model is unavailable and the backend sends a Telegram/email alert.
 
 This check does not send user text, photos, or audio to Groq. It only asks Groq for the model list and compares model ids.
 
