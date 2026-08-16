@@ -120,6 +120,34 @@ async function sendModelFallbackAlert(c, mode, failedModel, fallbackModel, error
   ]);
 }
 
+async function sendModelCheckAlert(c, checks) {
+  const unavailable = Object.entries(checks)
+    .flatMap(([mode, items]) => items.filter(item => !item.available).map(item => `${mode}: ${item.model}`));
+
+  if (!unavailable.length) return;
+
+  const key = `model-check:${unavailable.join(',')}`;
+  c.modelAlerts = c.modelAlerts || {};
+  if (c.modelAlerts[key] === c.date) return;
+
+  c.modelAlerts[key] = c.date;
+  saveCounter(c);
+
+  const msg = [
+    'KalenderAI model check failed',
+    '',
+    'Unavailable models:',
+    ...unavailable.map(model => `- ${model}`),
+    '',
+    `Date: ${c.date}`
+  ].join('\n');
+
+  await Promise.all([
+    sendTelegram(msg),
+    sendEmail('KalenderAI model check failed', msg)
+  ]);
+}
+
 function isModelUnavailableError(data) {
   const message = String(data && data.error && data.error.message || '').toLowerCase();
   return message.includes('model') && (
@@ -209,6 +237,7 @@ app.get('/model-check', async (req, res) => {
   if (!canCheckModels(req)) return res.status(401).json({ error: 'Unauthorized' });
 
   try {
+    const c = getCounter();
     const response = await fetch('https://api.groq.com/openai/v1/models', {
       headers: { 'Authorization': `Bearer ${GROQ_API_KEY}` }
     });
@@ -222,6 +251,7 @@ app.get('/model-check', async (req, res) => {
       transcribe: checkConfiguredModels(availableModels, [TRANSCRIBE_MODEL])
     };
     const ok = Object.values(checks).flat().every(item => item.available);
+    if (!ok) await sendModelCheckAlert(c, checks);
 
     res.status(ok ? 200 : 503).json({
       status: ok ? 'ok' : 'model_unavailable',
