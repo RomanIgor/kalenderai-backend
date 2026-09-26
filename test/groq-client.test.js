@@ -33,6 +33,27 @@ test('GroqRequestError exposes response and model details', () => {
   assert.equal(error.message, 'image_url is not supported by this model');
 });
 
+test('generic endpoint 404 is not a definitive model failure', () => {
+  const input = { status: 404, data: { error: { message: 'Route not found' } } };
+  const error = new GroqRequestError({ ...input, model: 'text-model' });
+
+  assert.equal(classifyGroqError(input), 'invalid_request');
+  assert.equal(error.category, 'invalid_request');
+  assert.equal(error.definitiveModelFailure, false);
+});
+
+test('malformed image input is not a definitive capability failure', () => {
+  const input = {
+    status: 400,
+    data: { error: { code: 'invalid_value', message: 'image_url must contain a valid data URL' } }
+  };
+  const error = new GroqRequestError({ ...input, model: 'vision-model' });
+
+  assert.equal(classifyGroqError(input), 'invalid_request');
+  assert.equal(error.category, 'invalid_request');
+  assert.equal(error.definitiveModelFailure, false);
+});
+
 test('listModels returns Groq model ids in API order', async () => {
   const client = createGroqClient({
     apiKey: 'test-key',
