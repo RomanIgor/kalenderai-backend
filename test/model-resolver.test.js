@@ -229,6 +229,29 @@ test('execute retries a definitive request failure with a second verified model'
   assert.deepEqual(probedModels(client), ['model-a', 'model-b']);
 });
 
+test('execute refreshes the selected model cache after a successful request', async () => {
+  let currentTime = 1000;
+  const client = createFakeClient({ models: ['model-a'] });
+  const resolver = createResolver({
+    client,
+    preferences: { text: [], photo: [], transcribe: [] },
+    cacheTtlMs: 100,
+    now: () => currentTime
+  });
+
+  await resolver.execute('photo', async model => {
+    assert.equal(model, 'model-a');
+    currentTime = 1050;
+    return 'ok';
+  });
+  currentTime = 1125;
+
+  const cached = await resolver.resolve('photo');
+
+  assert.equal(cached.checkedAt, 1050);
+  assert.equal(client.calls.filter(call => call[0] === 'listModels').length, 1);
+});
+
 test('execute returns a rate-limit error without invalidating or rediscovering', async () => {
   const rateLimitError = Object.assign(new Error('rate limited'), {
     status: 429,
@@ -299,7 +322,9 @@ test('execute attempts each model once and stops at maxCandidates', async () => 
       attempts.push(model);
       throw failures.get(model);
     }),
-    error => error === failures.get('model-b')
+    error => error instanceof CapabilityUnavailableError
+      && error.capability === 'photo'
+      && assert.deepEqual(error.rejectedModels, ['model-a', 'model-b']) === undefined
   );
   assert.deepEqual(attempts, ['model-a', 'model-b']);
   assert.equal(new Set(attempts).size, attempts.length);
@@ -390,6 +415,31 @@ test('checkHealth reports an unavailable photo capability with no selected model
     checkedAt: '2026-09-21T14:13:20.000Z',
     error: 'No usable Groq model is available for photo'
   });
+});
+
+test('checkHealth clears a cached model when forced refresh can no longer resolve it', async () => {
+  const models = ['model-a', 'whisper-large-v3'];
+  const client = createFakeClient({ models });
+  const resolver = createResolver({
+    client,
+    preferences: { text: [], photo: [], transcribe: ['whisper-large-v3'] }
+  });
+
+  assert.equal((await resolver.resolve('photo')).model, 'model-a');
+  models.splice(0, models.length, 'whisper-large-v3');
+
+  const health = await resolver.checkHealth();
+  assert.equal(health.capabilities.photo.healthy, false);
+  const listCallsAfterHealth = client.calls.filter(call => call[0] === 'listModels').length;
+
+  await assert.rejects(
+    resolver.resolve('photo'),
+    error => error instanceof CapabilityUnavailableError && error.capability === 'photo'
+  );
+  assert.equal(
+    client.calls.filter(call => call[0] === 'listModels').length,
+    listCallsAfterHealth + 1
+  );
 });
 
 function createResolver(overrides) {
