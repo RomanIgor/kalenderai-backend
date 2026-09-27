@@ -205,6 +205,193 @@ test('force refresh, exclusion, and invalidation bypass an otherwise usable cach
   assert.equal(client.calls.filter(call => call[0] === 'listModels').length, 3);
 });
 
+test('execute retries a definitive request failure with a second verified model', async () => {
+  const client = createFakeClient({ models: ['model-a', 'model-b'] });
+  const resolver = createResolver({
+    client,
+    preferences: { text: [], photo: [], transcribe: [] }
+  });
+  const attempts = [];
+
+  const result = await resolver.execute('photo', async model => {
+    attempts.push(model);
+    if (model === 'model-a') {
+      throw Object.assign(new Error('model retired'), {
+        category: 'model_unavailable',
+        definitiveModelFailure: true
+      });
+    }
+    return 'replacement response';
+  });
+
+  assert.equal(result, 'replacement response');
+  assert.deepEqual(attempts, ['model-a', 'model-b']);
+  assert.deepEqual(probedModels(client), ['model-a', 'model-b']);
+});
+
+test('execute returns a rate-limit error without invalidating or rediscovering', async () => {
+  const rateLimitError = Object.assign(new Error('rate limited'), {
+    status: 429,
+    category: 'rate_limit',
+    definitiveModelFailure: false
+  });
+  const client = createFakeClient({ models: ['model-a', 'model-b'] });
+  const resolver = createResolver({
+    client,
+    preferences: { text: [], photo: [], transcribe: [] }
+  });
+  const attempts = [];
+
+  await assert.rejects(
+    resolver.execute('photo', async model => {
+      attempts.push(model);
+      throw rateLimitError;
+    }),
+    error => error === rateLimitError
+  );
+  assert.equal((await resolver.resolve('photo')).model, 'model-a');
+  assert.deepEqual(attempts, ['model-a']);
+  assert.equal(client.calls.filter(call => call[0] === 'listModels').length, 1);
+  assert.deepEqual(probedModels(client), ['model-a']);
+});
+
+test('execute returns a transient server error without invalidating or rediscovering', async () => {
+  const serverError = Object.assign(new Error('upstream unavailable'), {
+    status: 500,
+    category: 'server_error',
+    definitiveModelFailure: false
+  });
+  const client = createFakeClient({ models: ['model-a', 'model-b'] });
+  const resolver = createResolver({
+    client,
+    preferences: { text: [], photo: [], transcribe: [] }
+  });
+  const attempts = [];
+
+  await assert.rejects(
+    resolver.execute('photo', async model => {
+      attempts.push(model);
+      throw serverError;
+    }),
+    error => error === serverError
+  );
+  assert.equal((await resolver.resolve('photo')).model, 'model-a');
+  assert.deepEqual(attempts, ['model-a']);
+  assert.equal(client.calls.filter(call => call[0] === 'listModels').length, 1);
+  assert.deepEqual(probedModels(client), ['model-a']);
+});
+
+test('execute attempts each model once and stops at maxCandidates', async () => {
+  const client = createFakeClient({ models: ['model-a', 'model-b', 'model-c'] });
+  const resolver = createResolver({
+    client,
+    preferences: { text: [], photo: [], transcribe: [] },
+    maxCandidates: 2
+  });
+  const attempts = [];
+  const failures = new Map([
+    ['model-a', Object.assign(new Error('model-a retired'), { definitiveModelFailure: true })],
+    ['model-b', Object.assign(new Error('model-b retired'), { definitiveModelFailure: true })]
+  ]);
+
+  await assert.rejects(
+    resolver.execute('photo', async model => {
+      attempts.push(model);
+      throw failures.get(model);
+    }),
+    error => error === failures.get('model-b')
+  );
+  assert.deepEqual(attempts, ['model-a', 'model-b']);
+  assert.equal(new Set(attempts).size, attempts.length);
+});
+
+test('execute notifies a transition only after the replacement request succeeds', async () => {
+  const events = [];
+  const client = createFakeClient({ models: ['model-a', 'model-b'] });
+  const resolver = createResolver({
+    client,
+    preferences: { text: [], photo: [], transcribe: [] },
+    onTransition: async transition => {
+      events.push(['transition', transition]);
+    }
+  });
+
+  const result = await resolver.execute('photo', async model => {
+    events.push(['operation', model]);
+    if (model === 'model-a') {
+      throw Object.assign(new Error('model retired'), {
+        category: 'model_unavailable',
+        definitiveModelFailure: true
+      });
+    }
+    return 'ok';
+  });
+
+  assert.equal(result, 'ok');
+  assert.deepEqual(events, [
+    ['operation', 'model-a'],
+    ['operation', 'model-b'],
+    ['transition', {
+      capability: 'photo',
+      from: 'model-a',
+      to: 'model-b',
+      reason: 'model_unavailable'
+    }]
+  ]);
+});
+
+test('checkHealth stays healthy when stale preferences are replaced', async () => {
+  const client = createFakeClient({
+    models: ['chat-model', 'whisper-large-v3']
+  });
+  const resolver = createResolver({ client });
+
+  const health = await resolver.checkHealth();
+
+  assert.deepEqual(health, {
+    ok: true,
+    capabilities: {
+      text: {
+        healthy: true,
+        selectedModel: 'chat-model',
+        rejectedPreferences: ['openai/gpt-oss-120b'],
+        checkedAt: '2026-09-21T14:13:20.000Z'
+      },
+      photo: {
+        healthy: true,
+        selectedModel: 'chat-model',
+        rejectedPreferences: ['qwen/qwen3.6-27b'],
+        checkedAt: '2026-09-21T14:13:20.000Z'
+      },
+      transcribe: {
+        healthy: true,
+        selectedModel: 'whisper-large-v3',
+        rejectedPreferences: [],
+        checkedAt: '2026-09-21T14:13:20.000Z'
+      }
+    }
+  });
+});
+
+test('checkHealth reports an unavailable photo capability with no selected model', async () => {
+  const client = createFakeClient({
+    models: ['chat-model', 'whisper-large-v3'],
+    definitiveFailureCapabilities: ['photo']
+  });
+  const resolver = createResolver({ client });
+
+  const health = await resolver.checkHealth();
+
+  assert.equal(health.ok, false);
+  assert.deepEqual(health.capabilities.photo, {
+    healthy: false,
+    selectedModel: null,
+    rejectedPreferences: ['qwen/qwen3.6-27b'],
+    checkedAt: '2026-09-21T14:13:20.000Z',
+    error: 'No usable Groq model is available for photo'
+  });
+});
+
 function createResolver(overrides) {
   return createModelResolver({
     preferences,
@@ -215,9 +402,16 @@ function createResolver(overrides) {
   });
 }
 
-function createFakeClient({ models, definitiveFailures = [], probeErrors = new Map(), beforeList }) {
+function createFakeClient({
+  models,
+  definitiveFailures = [],
+  definitiveFailureCapabilities = [],
+  probeErrors = new Map(),
+  beforeList
+}) {
   const calls = [];
   const definitiveFailureSet = new Set(definitiveFailures);
+  const definitiveFailureCapabilitySet = new Set(definitiveFailureCapabilities);
 
   return {
     calls,
@@ -229,7 +423,7 @@ function createFakeClient({ models, definitiveFailures = [], probeErrors = new M
     async probeChatModel(model, capability) {
       calls.push(['probeChatModel', model, capability]);
       if (probeErrors.has(model)) throw probeErrors.get(model);
-      if (definitiveFailureSet.has(model)) {
+      if (definitiveFailureSet.has(model) || definitiveFailureCapabilitySet.has(capability)) {
         throw Object.assign(new Error(`${model} rejected`), { definitiveModelFailure: true });
       }
     }
