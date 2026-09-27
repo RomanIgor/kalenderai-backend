@@ -64,6 +64,32 @@ test('shares one in-flight discovery between simultaneous callers', async () => 
   ]);
 });
 
+test('does not share an excluded result between simultaneous callers', async () => {
+  let releaseCatalog;
+  const catalogReady = new Promise(resolve => { releaseCatalog = resolve; });
+  const client = createFakeClient({
+    models: ['model-a', 'model-b'],
+    beforeList: () => catalogReady
+  });
+  const resolver = createResolver({
+    client,
+    preferences: { text: [], photo: [], transcribe: [] }
+  });
+
+  const unrestrictedPromise = resolver.resolve('photo');
+  const excludingPromise = resolver.resolve('photo', { exclude: ['model-a'] });
+  releaseCatalog();
+  const [unrestricted, excluding] = await Promise.all([
+    unrestrictedPromise,
+    excludingPromise
+  ]);
+
+  assert.equal(unrestricted.model, 'model-a');
+  assert.equal(excluding.model, 'model-b');
+  assert.equal(client.calls.filter(call => call[0] === 'listModels').length, 2);
+  assert.deepEqual(probedModels(client), ['model-a', 'model-b']);
+});
+
 test('probes present preferences first and remaining catalog IDs lexicographically', async () => {
   const client = createFakeClient({
     models: ['z-model', 'preferred-a', 'a-model', 'preferred-z'],
