@@ -11,24 +11,28 @@ Backend proxy for the KalenderAI TWA/web app.
 
 The frontend sends text, photo, or audio requests to this backend. The backend keeps the Groq API key private, forwards requests to Groq, counts daily API requests, and sends optional Telegram/email alerts.
 
-## Current Groq Models
+## Groq Model Selection
 
-Default models in code:
+The configured model variables are ordered preferences, not hard pins. The resolver checks the models available to the configured Groq account. For text and photo, it tries preferred models in order, skips stale or incompatible preferences automatically, and then considers other accessible Groq chat models that satisfy the capability. For transcription, it verifies the configured preference against the Groq catalog.
+
+Default preferences in code:
 
 ```env
 GROQ_TEXT_MODELS=openai/gpt-oss-120b
-GROQ_PHOTO_MODELS=qwen/qwen3.6-27b
+GROQ_PHOTO_MODELS=qwen/qwen3.8-27b
 GROQ_TRANSCRIBE_MODEL=whisper-large-v3
 ```
 
-`GROQ_TEXT_MODELS` and `GROQ_PHOTO_MODELS` can contain comma-separated fallback models:
+`GROQ_TEXT_MODELS` and `GROQ_PHOTO_MODELS` accept comma-separated preferences in priority order. The singular `GROQ_TEXT_MODEL` and `GROQ_PHOTO_MODEL` variables remain supported when their plural equivalent is not set. Existing `GROQ_*_MODEL` and `GROQ_*_MODELS` values do not need to be removed during deployment; unavailable entries are reported in `rejectedPreferences` and skipped when a verified replacement exists.
+
+Resolver tuning defaults:
 
 ```env
-GROQ_TEXT_MODELS=openai/gpt-oss-120b,qwen/qwen3.6-27b
-GROQ_PHOTO_MODELS=qwen/qwen3.6-27b
+MODEL_CACHE_TTL_MS=86400000
+MODEL_MAX_CANDIDATES=8
 ```
 
-If Groq returns a model-unavailable error, the backend tries the next model in the list. If fallback is used, it sends a Telegram/email alert once per day for that failed model.
+`MODEL_CACHE_TTL_MS` caches a verified selection for 24 hours. `MODEL_MAX_CANDIDATES` limits discovery and retry work for one capability to eight candidates. Discovery is limited to the Groq catalog; the backend does not fall back to another provider. If the configured Groq account has no accessible free vision model, photo analysis and the photo capability health check fail until Groq provides access to a suitable model.
 
 ## Render Environment Variables
 
@@ -41,9 +45,11 @@ GROQ_API_KEY=...
 Recommended:
 
 ```env
-GROQ_TEXT_MODELS=openai/gpt-oss-120b,qwen/qwen3.6-27b
-GROQ_PHOTO_MODELS=qwen/qwen3.6-27b
+GROQ_TEXT_MODELS=openai/gpt-oss-120b
+GROQ_PHOTO_MODELS=qwen/qwen3.8-27b
 GROQ_TRANSCRIBE_MODEL=whisper-large-v3
+MODEL_CACHE_TTL_MS=86400000
+MODEL_MAX_CANDIDATES=8
 MODEL_CHECK_TOKEN=make-a-long-random-secret
 ```
 
@@ -63,8 +69,10 @@ DAILY_LIMIT=14400
 The backend sends Telegram alerts for:
 
 - daily request usage when 80 percent of `DAILY_LIMIT` is reached
-- automatic Groq model fallback
-- failed `/model-check` when a configured model is no longer available
+- a model transition after a request proves the previous model unusable and succeeds with a verified replacement; deduplicated once per capability/from/to transition per day
+- a critical `/model-check` failure when no usable Groq model exists for a required capability; deduplicated once per failed capability per day
+
+Configured email notifications receive the same model transition and critical health alerts. A stale preference by itself is not critical when the resolver verifies a replacement.
 
 Confirmed setup:
 
@@ -126,15 +134,49 @@ Healthy response:
 ```json
 {
   "status": "ok",
+  "checkedAt": "2026-09-27T08:00:00.000Z",
   "checks": {
-    "text": [{ "model": "openai/gpt-oss-120b", "available": true }],
-    "photo": [{ "model": "qwen/qwen3.6-27b", "available": true }],
-    "transcribe": [{ "model": "whisper-large-v3", "available": true }]
+    "text": {
+      "healthy": true,
+      "selectedModel": "openai/gpt-oss-120b",
+      "rejectedPreferences": [],
+      "checkedAt": "2026-09-27T08:00:00.000Z"
+    },
+    "photo": {
+      "healthy": true,
+      "selectedModel": "qwen/qwen3.8-27b",
+      "rejectedPreferences": ["qwen/qwen3.6-27b"],
+      "checkedAt": "2026-09-27T08:00:00.000Z"
+    },
+    "transcribe": {
+      "healthy": true,
+      "selectedModel": "whisper-large-v3",
+      "rejectedPreferences": [],
+      "checkedAt": "2026-09-27T08:00:00.000Z"
+    }
   }
 }
 ```
 
-If a model becomes unavailable, the endpoint returns HTTP `503` and sends a Telegram/email alert once per day.
+Each entry in `checks` is a capability object. `/model-check` returns HTTP `200` when every capability has a verified `selectedModel`, even if `rejectedPreferences` contains stale configured values. It returns HTTP `503` only when at least one capability is unhealthy, for example:
+
+```json
+{
+  "status": "model_unavailable",
+  "checkedAt": "2026-09-27T08:00:00.000Z",
+  "checks": {
+    "photo": {
+      "healthy": false,
+      "selectedModel": null,
+      "rejectedPreferences": ["qwen/qwen3.8-27b"],
+      "checkedAt": "2026-09-27T08:00:00.000Z",
+      "error": "No usable Groq model is available for photo"
+    }
+  }
+}
+```
+
+The actual response always contains `text`, `photo`, and `transcribe` capability objects; the shortened failure example shows only the failing capability.
 
 ## Daily Automation
 
@@ -153,7 +195,7 @@ Recommended cron-job.org configuration:
 - Schedule: daily, for example 08:00 Europe/Berlin
 - Expected status: `200`
 
-Use the same `MODEL_CHECK_TOKEN` value here. If cron-job.org receives HTTP `200`, the models are available. If it receives HTTP `503`, at least one configured model is unavailable and the backend sends a Telegram/email alert.
+Use the same `MODEL_CHECK_TOKEN` value here. HTTP `200` means every required capability has a verified model. HTTP `503` means at least one capability has no usable Groq model and the backend sends a critical Telegram/email alert.
 
 This check does not send user text, photos, or audio to Groq. It only asks Groq for the model list and compares model ids.
 
