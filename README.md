@@ -32,7 +32,7 @@ MODEL_CACHE_TTL_MS=86400000
 MODEL_MAX_CANDIDATES=8
 ```
 
-`MODEL_CACHE_TTL_MS` caches a verified selection for 24 hours. `MODEL_MAX_CANDIDATES` limits discovery and retry work for one capability to eight candidates. Discovery is limited to the Groq catalog; the backend does not fall back to another provider. If the configured Groq account has no accessible free vision model, photo analysis and the photo capability health check fail until Groq provides access to a suitable model.
+`MODEL_CACHE_TTL_MS` caches a verified selection for 24 hours. `MODEL_MAX_CANDIDATES` limits each discovery pass to examining eight candidate model ids. Request execution separately stops after attempting eight distinct operation models, but repeated discovery passes during one request can produce more than eight probes overall; this setting is not a global probe or network-call cap. Discovery is limited to the Groq catalog, and the backend does not fall back to another provider. The catalog does not expose a stable free/paid flag, so the deployed Groq account and API key determine which models are accessible; keep billing disabled on that account if the deployment must remain free. The resolver intentionally has no static free-model allowlist. If the configured Groq account has no accessible free vision model, photo analysis and the photo capability health check fail until Groq provides access to a suitable model.
 
 ## Render Environment Variables
 
