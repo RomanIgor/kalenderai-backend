@@ -7,7 +7,7 @@ const fs = require('fs');
 const path = require('path');
 
 const { createGroqClient } = require('./lib/groq-client');
-const { createModelResolver } = require('./lib/model-resolver');
+const { CapabilityUnavailableError, createModelResolver } = require('./lib/model-resolver');
 
 const ALERT_PERCENT = 0.80;
 const COUNTER_FILE = path.join('/tmp', 'kalenderai_counter.json');
@@ -145,22 +145,37 @@ async function sendCriticalHealthAlerts({ counterStore, notifier, capabilities }
   const failedCapabilities = Object.entries(capabilities)
     .filter(([, health]) => health.healthy === false);
 
-  await Promise.all(failedCapabilities.map(async ([capability, health]) => {
-    const message = [
-      'KalenderAI critical model health failure',
-      '',
-      `No accessible Groq Free model satisfies the ${capability} capability.`,
-      `Error: ${health.error || 'Capability unavailable'}`
-    ].join('\n');
-
-    await sendAlertOnce({
+  await Promise.all(failedCapabilities.map(([capability, health]) => (
+    sendCriticalCapabilityAlert({
       counterStore,
       notifier,
-      key: `model-critical:${capability}`,
-      subject: 'KalenderAI critical model health failure',
-      message
-    });
-  }));
+      capability,
+      error: health.error
+    })
+  )));
+}
+
+async function sendCriticalCapabilityAlert({
+  counterStore,
+  notifier,
+  capability,
+  error
+}) {
+  const errorMessage = error && error.message ? error.message : error;
+  const message = [
+    'KalenderAI critical model health failure',
+    '',
+    `No accessible Groq Free model satisfies the ${capability} capability.`,
+    `Error: ${errorMessage || 'Capability unavailable'}`
+  ].join('\n');
+
+  await sendAlertOnce({
+    counterStore,
+    notifier,
+    key: `model-critical:${capability}`,
+    subject: 'KalenderAI critical model health failure',
+    message
+  });
 }
 
 async function checkAndAlert({ counter, counterStore, notifier, dailyLimit }) {
@@ -191,7 +206,10 @@ function createApp(options = {}) {
   const dailyLimit = Number.parseInt(process.env.DAILY_LIMIT || '14400', 10);
   const counterStore = options.counterStore || createFileCounterStore();
   const notifier = options.notifier || createNotifier();
-  const groqClient = options.groqClient || createGroqClient({ apiKey: process.env.GROQ_API_KEY });
+  const groqClient = options.groqClient || createGroqClient({
+    apiKey: process.env.GROQ_API_KEY,
+    fetchImpl: fetch
+  });
   const resolver = options.resolver || createModelResolver({
     client: groqClient,
     preferences: createPreferences(),
@@ -287,6 +305,14 @@ function createApp(options = {}) {
       res.json(data);
     } catch (error) {
       console.error('Analyze error:', error.message);
+      if (error instanceof CapabilityUnavailableError) {
+        await sendCriticalCapabilityAlert({
+          counterStore,
+          notifier,
+          capability: error.capability,
+          error
+        });
+      }
       res.status(500).json({ error: error.message });
     }
   });
@@ -306,6 +332,14 @@ function createApp(options = {}) {
       res.send(transcript);
     } catch (error) {
       console.error('Transcribe error:', error.message);
+      if (error instanceof CapabilityUnavailableError) {
+        await sendCriticalCapabilityAlert({
+          counterStore,
+          notifier,
+          capability: 'transcribe',
+          error
+        });
+      }
       res.status(500).json({ error: error.message });
     }
   });

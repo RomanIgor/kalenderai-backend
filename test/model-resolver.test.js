@@ -205,6 +205,91 @@ test('force refresh, exclusion, and invalidation bypass an otherwise usable cach
   assert.equal(client.calls.filter(call => call[0] === 'listModels').length, 3);
 });
 
+test('force refresh preserves the last healthy cache after non-definitive failures', async t => {
+  const failures = [
+    Object.assign(new Error('rate limited'), {
+      status: 429,
+      category: 'rate_limit',
+      definitiveModelFailure: false
+    }),
+    Object.assign(new Error('invalid API key'), {
+      status: 401,
+      category: 'authentication',
+      definitiveModelFailure: false
+    }),
+    Object.assign(new Error('request timed out'), {
+      category: 'transient',
+      definitiveModelFailure: false
+    }),
+    Object.assign(new Error('upstream unavailable'), {
+      status: 503,
+      category: 'transient',
+      definitiveModelFailure: false
+    })
+  ];
+
+  for (const failure of failures) {
+    await t.test(failure.category + ':' + (failure.status || 'timeout'), async () => {
+      const probeErrors = new Map();
+      const client = createFakeClient({ models: ['model-a'], probeErrors });
+      const resolver = createResolver({
+        client,
+        preferences: { text: [], photo: [], transcribe: [] }
+      });
+
+      const healthy = await resolver.resolve('photo');
+      probeErrors.set('model-a', failure);
+
+      await assert.rejects(
+        resolver.resolve('photo', { forceRefresh: true }),
+        error => error === failure
+      );
+      const callsAfterRefresh = client.calls.length;
+
+      assert.deepEqual(await resolver.resolve('photo'), healthy);
+      assert.equal(client.calls.length, callsAfterRefresh);
+    });
+  }
+});
+
+test('force refresh tries the last successful selection before other catalog models', async () => {
+  const models = ['model-z'];
+  const client = createFakeClient({ models });
+  const resolver = createResolver({
+    client,
+    preferences: { text: [], photo: [], transcribe: [] }
+  });
+
+  assert.equal((await resolver.resolve('photo')).model, 'model-z');
+  models.unshift('model-a');
+
+  assert.equal((await resolver.resolve('photo', { forceRefresh: true })).model, 'model-z');
+  assert.deepEqual(probedModels(client), ['model-z', 'model-z']);
+});
+
+test('force refresh emits a transition after verifying a changed selection', async () => {
+  const models = ['model-a'];
+  const transitions = [];
+  const client = createFakeClient({ models });
+  const resolver = createResolver({
+    client,
+    preferences: { text: [], photo: [], transcribe: [] },
+    onTransition: async transition => transitions.push(transition)
+  });
+
+  assert.equal((await resolver.resolve('photo')).model, 'model-a');
+  models.splice(0, models.length, 'model-b');
+
+  assert.equal((await resolver.resolve('photo', { forceRefresh: true })).model, 'model-b');
+  assert.deepEqual(probedModels(client), ['model-a', 'model-b']);
+  assert.deepEqual(transitions, [{
+    capability: 'photo',
+    from: 'model-a',
+    to: 'model-b',
+    reason: 'catalog_removed'
+  }]);
+});
+
 test('execute retries a definitive request failure with a second verified model', async () => {
   const client = createFakeClient({ models: ['model-a', 'model-b'] });
   const resolver = createResolver({
@@ -363,6 +448,40 @@ test('execute notifies a transition only after the replacement request succeeds'
       reason: 'model_unavailable'
     }]
   ]);
+});
+
+test('execute preserves the first transition origin across multiple failed replacements', async () => {
+  const transitions = [];
+  const client = createFakeClient({ models: ['model-a', 'model-b', 'model-c'] });
+  const resolver = createResolver({
+    client,
+    preferences: { text: [], photo: [], transcribe: [] },
+    onTransition: async transition => transitions.push(transition)
+  });
+
+  const result = await resolver.execute('photo', async model => {
+    if (model === 'model-a') {
+      throw Object.assign(new Error('model retired'), {
+        category: 'model_unavailable',
+        definitiveModelFailure: true
+      });
+    }
+    if (model === 'model-b') {
+      throw Object.assign(new Error('images unsupported'), {
+        category: 'capability_unsupported',
+        definitiveModelFailure: true
+      });
+    }
+    return 'ok';
+  });
+
+  assert.equal(result, 'ok');
+  assert.deepEqual(transitions, [{
+    capability: 'photo',
+    from: 'model-a',
+    to: 'model-c',
+    reason: 'model_unavailable'
+  }]);
 });
 
 test('checkHealth stays healthy when stale preferences are replaced', async () => {

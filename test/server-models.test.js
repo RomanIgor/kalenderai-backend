@@ -2,6 +2,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 
 const { createApp } = require('../server');
+const { CapabilityUnavailableError } = require('../lib/model-resolver');
 
 const CHECKED_AT = '2026-09-27T08:00:00.000Z';
 
@@ -123,6 +124,84 @@ test('GET /model-check sends one critical alert per failed capability per day', 
     'model-critical:text': '2026-09-27',
     'model-critical:photo': '2026-09-27'
   });
+});
+
+test('POST /api/analyze alerts immediately and shares critical deduplication with model-check', async () => {
+  const capabilities = healthyCapabilities();
+  capabilities.photo = unavailableCapability('photo', 'vision-retired');
+  const dependencies = createDependencies({
+    resolver: {
+      async execute() {
+        throw new CapabilityUnavailableError('photo', ['vision-retired']);
+      },
+      async checkHealth() {
+        return { ok: false, capabilities };
+      }
+    }
+  });
+
+  await withServer(dependencies, async baseUrl => {
+    const analyze = () => fetch(`${baseUrl}/api/analyze`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ messages: [], mode: 'photo' })
+    });
+
+    const first = await analyze();
+    assert.equal(first.status, 500);
+    assert.deepEqual(await first.json(), {
+      error: 'No usable Groq model is available for photo'
+    });
+    assert.equal(dependencies.notifier.alerts.length, 1);
+    assert.match(
+      dependencies.notifier.alerts[0].message,
+      /no accessible Groq Free model satisfies the photo capability/i
+    );
+
+    assert.equal((await analyze()).status, 500);
+    assert.equal((await fetch(`${baseUrl}/model-check`)).status, 503);
+    assert.equal(dependencies.notifier.alerts.length, 1);
+  });
+
+  assert.equal(
+    dependencies.counterStore.counter.modelAlerts['model-critical:photo'],
+    '2026-09-27'
+  );
+});
+
+test('POST /api/transcribe sends one deduplicated critical alert on capability exhaustion', async () => {
+  const dependencies = createDependencies({
+    resolver: {
+      async resolve() {
+        throw new CapabilityUnavailableError('transcribe', ['whisper-retired']);
+      }
+    }
+  });
+
+  await withServer(dependencies, async baseUrl => {
+    const transcribe = () => {
+      const form = new FormData();
+      form.append('file', new Blob(['audio']), 'voice.webm');
+      return fetch(`${baseUrl}/api/transcribe`, { method: 'POST', body: form });
+    };
+
+    const first = await transcribe();
+    assert.equal(first.status, 500);
+    assert.deepEqual(await first.json(), {
+      error: 'No usable Groq model is available for transcribe'
+    });
+    assert.equal((await transcribe()).status, 500);
+  });
+
+  assert.equal(dependencies.notifier.alerts.length, 1);
+  assert.match(
+    dependencies.notifier.alerts[0].message,
+    /no accessible Groq Free model satisfies the transcribe capability/i
+  );
+  assert.equal(
+    dependencies.counterStore.counter.modelAlerts['model-critical:transcribe'],
+    '2026-09-27'
+  );
 });
 
 test('POST /api/analyze sends one daily alert per successful model transition', async () => {

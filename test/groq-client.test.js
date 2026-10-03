@@ -1,5 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const http = require('node:http');
 
 const { classifyGroqError, createGroqClient, GroqRequestError } = require('../lib/groq-client');
 
@@ -54,6 +55,97 @@ test('malformed image input is not a definitive capability failure', () => {
   assert.equal(error.definitiveModelFailure, false);
 });
 
+test('status-wide failures take precedence over model-looking messages', () => {
+  const statusCases = [
+    [429, 'The model was decommissioned', 'rate_limit'],
+    [401, 'The model does not exist', 'authentication'],
+    [403, 'The model is unavailable', 'authentication'],
+    [503, 'The model was decommissioned', 'transient']
+  ];
+
+  for (const [status, message, expected] of statusCases) {
+    const input = { status, data: { error: { message } } };
+    const error = new GroqRequestError({ ...input, model: 'test-model' });
+
+    assert.equal(classifyGroqError(input), expected);
+    assert.equal(error.category, expected);
+    assert.equal(error.definitiveModelFailure, false);
+  }
+});
+
+test('recognizes definitive model codes and model-specific access messages', () => {
+  const modelCases = [
+    {
+      status: 404,
+      data: { error: { code: 'model_not_found', message: 'Requested resource was not found' } }
+    },
+    {
+      status: 400,
+      data: { error: { code: 'model_decommissioned', message: 'This identifier is retired' } }
+    },
+    {
+      status: 404,
+      data: { error: { message: 'The model `old-model` does not exist or you do not have access to it.' } }
+    },
+    {
+      status: 403,
+      data: {
+        error: {
+          code: 'model_permission_blocked_project',
+          message: 'The model `restricted-model` is blocked at the project level.'
+        }
+      }
+    }
+  ];
+
+  for (const input of modelCases) {
+    const error = new GroqRequestError({ ...input, model: 'test-model' });
+
+    assert.equal(classifyGroqError(input), 'model_unavailable');
+    assert.equal(error.definitiveModelFailure, true);
+  }
+});
+
+test('recognizes unsupported production chat features as capability failures', () => {
+  const capabilityCases = [
+    {
+      status: 400,
+      data: {
+        error: {
+          code: 'unsupported_parameter',
+          param: 'reasoning_effort',
+          message: 'reasoning_effort is not supported for this model'
+        }
+      }
+    },
+    {
+      status: 400,
+      data: {
+        error: {
+          code: 'invalid_request_error',
+          message: 'response_format json_object is not supported by this model'
+        }
+      }
+    },
+    {
+      status: 400,
+      data: {
+        error: {
+          code: 'unsupported_value',
+          message: 'reasoning_format hidden is not supported with the selected model'
+        }
+      }
+    }
+  ];
+
+  for (const input of capabilityCases) {
+    const error = new GroqRequestError({ ...input, model: 'test-model' });
+
+    assert.equal(classifyGroqError(input), 'capability_unsupported');
+    assert.equal(error.definitiveModelFailure, true);
+  }
+});
+
 test('listModels returns Groq model ids in API order', async () => {
   const client = createGroqClient({
     apiKey: 'test-key',
@@ -75,12 +167,56 @@ test('probeChatModel sends minimal JSON probes for text and photo capabilities',
     messages: [{ role: 'user', content: 'Reply with {"ok":true}.' }],
     max_tokens: 16,
     temperature: 0,
-    response_format: { type: 'json_object' }
+    response_format: { type: 'json_object' },
+    reasoning_format: 'hidden',
+    reasoning_effort: 'low'
   });
   assert.equal(requests[1].body.model, 'vision-model');
   assert.equal(requests[1].body.messages[0].content[0].text, 'Reply with {"ok":true}.');
   assert.equal(requests[1].body.messages[0].content[1].type, 'image_url');
   assert.match(requests[1].body.messages[0].content[1].image_url.url, /^data:image\/png;base64,/);
+  assert.equal(requests[1].body.reasoning_format, 'hidden');
+  assert.equal(requests[1].body.reasoning_effort, 'none');
+});
+
+test('transcribe sends a valid multipart body with the production default transport', async () => {
+  let requestDetails;
+
+  await withLoopbackServer(async ({ apiUrl, request }) => {
+    const originalFetch = global.fetch;
+    global.fetch = async () => {
+      throw new Error('native fetch must not be the Groq client default');
+    };
+
+    try {
+      const client = createGroqClient({ apiKey: 'wire-test-key', apiUrl });
+      const transcript = await client.transcribe('whisper-test', {
+        buffer: Buffer.from('wire-audio'),
+        originalname: 'voice.webm',
+        mimetype: 'audio/webm'
+      });
+
+      assert.equal(transcript, 'wire transcript');
+      requestDetails = await request;
+    } finally {
+      global.fetch = originalFetch;
+    }
+  });
+
+  assert.equal(requestDetails.url, '/audio/transcriptions');
+  assert.equal(requestDetails.headers.authorization, 'Bearer wire-test-key');
+  assert.match(requestDetails.headers['content-type'], /^multipart\/form-data; boundary=/);
+
+  const boundary = requestDetails.headers['content-type'].match(/boundary=(?:"([^"]+)"|([^;]+))/)[1]
+    || requestDetails.headers['content-type'].match(/boundary=(?:"([^"]+)"|([^;]+))/)[2];
+  const body = requestDetails.body.toString('utf8');
+  assert.match(body, new RegExp(`--${escapeRegExp(boundary)}`));
+  assert.match(body, /name="file"; filename="voice\.webm"/);
+  assert.match(body, /Content-Type: audio\/webm/i);
+  assert.match(body, /wire-audio/);
+  assert.match(body, /name="model"\r\n\r\nwhisper-test/);
+  assert.match(body, /name="language"\r\n\r\nde/);
+  assert.match(body, /name="response_format"\r\n\r\ntext/);
 });
 
 test('payload errors are converted to GroqRequestError', async () => {
@@ -149,4 +285,39 @@ function jsonResponse(data, status = 200) {
     status,
     json: async () => data
   };
+}
+
+async function withLoopbackServer(run) {
+  let resolveRequest;
+  const request = new Promise(resolve => { resolveRequest = resolve; });
+  const server = http.createServer((req, res) => {
+    const chunks = [];
+    req.on('data', chunk => chunks.push(chunk));
+    req.on('end', () => {
+      resolveRequest({
+        url: req.url,
+        headers: req.headers,
+        body: Buffer.concat(chunks)
+      });
+      res.writeHead(200, { 'Content-Type': 'text/plain' });
+      res.end('wire transcript');
+    });
+  });
+
+  server.listen(0, '127.0.0.1');
+  await new Promise((resolve, reject) => {
+    server.once('listening', resolve);
+    server.once('error', reject);
+  });
+
+  try {
+    const { port } = server.address();
+    await run({ apiUrl: `http://127.0.0.1:${port}`, request });
+  } finally {
+    await new Promise((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+  }
+}
+
+function escapeRegExp(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }

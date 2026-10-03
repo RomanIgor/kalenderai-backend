@@ -70,7 +70,7 @@ The backend sends Telegram alerts for:
 
 - daily request usage when 80 percent of `DAILY_LIMIT` is reached
 - a model transition after a request proves the previous model unusable and succeeds with a verified replacement; deduplicated once per capability/from/to transition per day
-- a critical `/model-check` failure when no usable Groq model exists for a required capability; deduplicated once per failed capability per day
+- a critical capability failure when `/model-check` or a live request finds no usable Groq model for a required capability; deduplicated once per failed capability per day
 
 Configured email notifications receive the same model transition and critical health alerts. A stale preference by itself is not critical when the resolver verifies a replacement.
 
@@ -197,7 +197,7 @@ Recommended cron-job.org configuration:
 
 Use the same `MODEL_CHECK_TOKEN` value here. HTTP `200` means every required capability has a verified model. HTTP `503` means at least one capability has no usable Groq model and the backend sends a critical Telegram/email alert.
 
-This check does not send user text, photos, or audio to Groq. It only asks Groq for the model list and compares model ids.
+This check does not send user text, photos, or audio to Groq. It asks Groq for the model list, then verifies text and photo candidates with minimal synthetic chat requests using JSON mode and the production reasoning settings. The photo probe includes an embedded one-pixel test image. Transcription health only checks the configured model against the catalog because the health check does not upload audio.
 
 ## Manual Verification
 
