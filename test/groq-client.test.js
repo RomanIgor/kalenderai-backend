@@ -55,6 +55,31 @@ test('malformed image input is not a definitive capability failure', () => {
   assert.equal(error.definitiveModelFailure, false);
 });
 
+test('unsupported image URL values are request-local invalid requests', () => {
+  const malformedImageCases = [
+    {
+      status: 400,
+      data: { error: { code: 'invalid_value', message: 'image_url uses an unsupported URL scheme' } }
+    },
+    {
+      status: 400,
+      data: { error: { code: 'invalid_value', message: 'image_url has an unsupported URL format' } }
+    },
+    {
+      status: 422,
+      data: { error: { code: 'unsupported_value', param: 'image_url', message: 'Unsupported image_url value' } }
+    }
+  ];
+
+  for (const input of malformedImageCases) {
+    const error = new GroqRequestError({ ...input, model: 'vision-model' });
+
+    assert.equal(classifyGroqError(input), 'invalid_request');
+    assert.equal(error.category, 'invalid_request');
+    assert.equal(error.definitiveModelFailure, false);
+  }
+});
+
 test('status-wide failures take precedence over model-looking messages', () => {
   const statusCases = [
     [429, 'The model was decommissioned', 'rate_limit'],
@@ -108,6 +133,24 @@ test('recognizes definitive model codes and model-specific access messages', () 
 
 test('recognizes unsupported production chat features as capability failures', () => {
   const capabilityCases = [
+    {
+      status: 400,
+      data: {
+        error: {
+          code: 'invalid_value',
+          message: 'The model does not support image inputs'
+        }
+      }
+    },
+    {
+      status: 422,
+      data: {
+        error: {
+          code: 'invalid_value',
+          message: 'Vision is not supported by this model'
+        }
+      }
+    },
     {
       status: 400,
       data: {
