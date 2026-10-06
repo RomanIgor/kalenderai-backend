@@ -250,7 +250,7 @@ test('probeChatModel sends minimal JSON probes for text and photo capabilities',
 
   assert.deepEqual(requests[0].body, {
     model: 'text-model',
-    messages: [{ role: 'user', content: 'Reply with {"ok":true}.' }],
+    messages: [{ role: 'user', content: 'Reply with a valid json object: {"ok":true}.' }],
     max_tokens: 16,
     temperature: 0,
     response_format: { type: 'json_object' },
@@ -258,7 +258,7 @@ test('probeChatModel sends minimal JSON probes for text and photo capabilities',
     reasoning_effort: 'low'
   });
   assert.equal(requests[1].body.model, 'vision-model');
-  assert.equal(requests[1].body.messages[0].content[0].text, 'Reply with {"ok":true}.');
+  assert.equal(requests[1].body.messages[0].content[0].text, 'Reply with a valid json object: {"ok":true}.');
   assert.equal(requests[1].body.messages[0].content[1].type, 'image_url');
   assert.match(requests[1].body.messages[0].content[1].image_url.url, /^data:image\/png;base64,/);
   assert.equal(requests[1].body.reasoning_format, 'hidden');
@@ -356,6 +356,19 @@ test('chat uses the supplied text model with low reasoning effort', async () => 
 
   assert.equal(requests[0].body.model, 'text-model');
   assert.equal(requests[0].body.reasoning_effort, 'low');
+});
+
+test('chat guarantees a lowercase json instruction without mutating caller messages', async () => {
+  const requests = [];
+  const messages = [{ role: 'user', content: 'Return only valid JSON.' }];
+  const client = createGroqClient({ apiKey: 'test-key', fetchImpl: captureJsonRequest(requests) });
+
+  await client.chat('text-model', messages, 'text');
+
+  assert.equal(requests[0].body.messages[0].role, 'system');
+  assert.match(requests[0].body.messages[0].content, /json/);
+  assert.deepEqual(requests[0].body.messages.slice(1), messages);
+  assert.deepEqual(messages, [{ role: 'user', content: 'Return only valid JSON.' }]);
 });
 
 function captureJsonRequest(requests) {
