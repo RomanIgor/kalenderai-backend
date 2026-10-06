@@ -80,6 +80,31 @@ test('unsupported image URL values are request-local invalid requests', () => {
   }
 });
 
+test('explicit model wording keeps overlapping image value errors definitive', () => {
+  const modelCapabilityCases = [
+    {
+      status: 400,
+      data: { error: { code: 'invalid_value', message: 'The image_url value is unsupported by this model' } }
+    },
+    {
+      status: 400,
+      data: { error: { code: 'unsupported_value', message: 'This model marks the image_url value as unsupported' } }
+    },
+    {
+      status: 422,
+      data: { error: { code: 'invalid_value', message: 'This model does not support the image_url value' } }
+    }
+  ];
+
+  for (const input of modelCapabilityCases) {
+    const error = new GroqRequestError({ ...input, model: 'vision-model' });
+
+    assert.equal(classifyGroqError(input), 'capability_unsupported');
+    assert.equal(error.category, 'capability_unsupported');
+    assert.equal(error.definitiveModelFailure, true);
+  }
+});
+
 test('status-wide failures take precedence over model-looking messages', () => {
   const statusCases = [
     [429, 'The model was decommissioned', 'rate_limit'],
