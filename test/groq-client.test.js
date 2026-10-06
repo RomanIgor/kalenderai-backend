@@ -66,6 +66,24 @@ test('unsupported image URL values are request-local invalid requests', () => {
       data: { error: { code: 'invalid_value', message: 'image_url has an unsupported URL format' } }
     },
     {
+      status: 400,
+      data: {
+        error: {
+          code: 'invalid_value',
+          message: 'The model could not fetch the image_url value because it uses an unsupported URL scheme'
+        }
+      }
+    },
+    {
+      status: 400,
+      data: {
+        error: {
+          code: 'invalid_value',
+          message: 'The selected model received an image_url with an unsupported URL format'
+        }
+      }
+    },
+    {
       status: 422,
       data: { error: { code: 'unsupported_value', param: 'image_url', message: 'Unsupported image_url value' } }
     }
