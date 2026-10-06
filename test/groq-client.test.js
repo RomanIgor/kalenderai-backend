@@ -261,6 +261,12 @@ test('probeChatModel sends minimal JSON probes for text and photo capabilities',
   assert.equal(requests[1].body.messages[0].content[0].text, 'Reply with a valid json object: {"ok":true}.');
   assert.equal(requests[1].body.messages[0].content[1].type, 'image_url');
   assert.match(requests[1].body.messages[0].content[1].image_url.url, /^data:image\/png;base64,/);
+  const probeImage = Buffer.from(
+    requests[1].body.messages[0].content[1].image_url.url.split(',')[1],
+    'base64'
+  );
+  assert.ok(probeImage.readUInt32BE(16) >= 32, 'photo probe image must be at least 32 px wide');
+  assert.ok(probeImage.readUInt32BE(20) >= 32, 'photo probe image must be at least 32 px high');
   assert.equal(requests[1].body.reasoning_format, 'hidden');
   assert.equal(requests[1].body.reasoning_effort, 'none');
 });
