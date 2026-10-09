@@ -173,6 +173,25 @@ test('continues only after definitive model failures', async () => {
   assert.deepEqual(probedModels(client), ['model-a', 'model-b']);
 });
 
+test('continues discovery after a candidate fails JSON generation', async () => {
+  const generationError = Object.assign(new Error('Failed to validate JSON'), {
+    category: 'generation_failed',
+    candidateRejection: true,
+    definitiveModelFailure: false
+  });
+  const client = createFakeClient({
+    models: ['model-a', 'model-b'],
+    probeErrors: new Map([['model-a', generationError]])
+  });
+  const resolver = createResolver({
+    client,
+    preferences: { text: [], photo: [], transcribe: [] }
+  });
+
+  assert.equal((await resolver.resolve('text')).model, 'model-b');
+  assert.deepEqual(probedModels(client), ['model-a', 'model-b']);
+});
+
 test('rethrows a non-definitive probe error without trying another model', async () => {
   const transientError = Object.assign(new Error('temporary outage'), {
     definitiveModelFailure: false

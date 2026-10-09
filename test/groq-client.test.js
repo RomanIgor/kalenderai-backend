@@ -43,6 +43,25 @@ test('generic endpoint 404 is not a definitive model failure', () => {
   assert.equal(error.definitiveModelFailure, false);
 });
 
+test('JSON failed_generation rejects only the probed candidate', () => {
+  const input = {
+    status: 400,
+    data: {
+      error: {
+        type: 'invalid_request_error',
+        message: "Failed to validate JSON. Please adjust your prompt. See 'failed_generation' for more details.",
+        failed_generation: '{not valid json}'
+      }
+    }
+  };
+  const error = new GroqRequestError({ ...input, model: 'text-model' });
+
+  assert.equal(classifyGroqError(input), 'generation_failed');
+  assert.equal(error.category, 'generation_failed');
+  assert.equal(error.candidateRejection, true);
+  assert.equal(error.definitiveModelFailure, false);
+});
+
 test('malformed image input is not a definitive capability failure', () => {
   const input = {
     status: 400,
