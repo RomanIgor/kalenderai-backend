@@ -278,7 +278,7 @@ test('probeChatModel sends minimal JSON probes for text and photo capabilities',
   assert.deepEqual(requests[0].body, {
     model: 'text-model',
     messages: [{ role: 'user', content: 'Reply with a valid json object: {"ok":true}.' }],
-    max_tokens: 16,
+    max_tokens: 256,
     temperature: 0,
     response_format: { type: 'json_object' },
     reasoning_format: 'hidden',
@@ -296,6 +296,7 @@ test('probeChatModel sends minimal JSON probes for text and photo capabilities',
   assert.ok(probeImage.readUInt32BE(20) >= 32, 'photo probe image must be at least 32 px high');
   assert.equal(requests[1].body.reasoning_format, 'hidden');
   assert.equal(requests[1].body.reasoning_effort, 'none');
+  assert.equal(requests[1].body.max_tokens, 16);
 });
 
 test('transcribe sends a valid multipart body with the production default transport', async () => {
