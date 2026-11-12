@@ -182,6 +182,14 @@ test('recognizes definitive model codes and model-specific access messages', () 
           message: 'The model `restricted-model` is blocked at the project level.'
         }
       }
+    },
+    {
+      status: 403,
+      data: {
+        error: {
+          message: 'The model `canopylabs/orpheus-arabic-saudi` requires terms acceptance.'
+        }
+      }
     }
   ];
 

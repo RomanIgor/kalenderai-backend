@@ -113,6 +113,8 @@ test('never probes known non-chat model families for text or photo', async () =>
       'llama-guard-4',
       'playai-tts',
       'compound-speech',
+      'canopylabs/orpheus-v1-english',
+      'canopylabs/orpheus-arabic-saudi',
       'chat-model'
     ]
   });
